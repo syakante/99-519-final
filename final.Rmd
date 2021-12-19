@@ -1,0 +1,310 @@
+---
+title: 'Data Analysis of Data Analyst Job Listings'
+subtitle: 99-519 Final Project
+author: "Shelley Kim"
+date: "12 August 2021"
+header-includes:
+    - \usepackage{setspace}\doublespacing
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r}
+library(tidyverse)
+library(leaflet)
+library(ggplot2)
+library(plotly)
+
+mycols <- c("Job Title", "Salary Estimate", "Rating", "Company Name", "Location", "Industry", "Sector", "tools", "skills", "education")
+analyst <- read_csv("F:\\summer 21\\99519\\out.csv") %>% select(mycols)
+zillow <- read_csv("F:\\summer 21\\99519\\price.csv") %>% select(`City Code`, City, State, `January 2017`) %>% mutate(Location = paste(City, ", ", State, sep=""))
+#for some godforsaken reason Burbank, CA appears twice
+#im going with the second (more expensive) one
+zillow <- zillow[-c(which(zillow$Location == "Burbank, CA")[1]),]
+all.df <- left_join(analyst, zillow, by="Location")
+
+
+# salary estimate into single number
+sal.est.numeric <- function(s){
+  #format: "$K-$127K (Glassdoor est.)"
+  ret <- str_extract_all(s, "\\d{2,3}") %>% unlist %>% as.numeric %>% mean
+  return(ret)
+}
+all.df$`Salary Estimate` = sapply(all.df$`Salary Estimate`, sal.est.numeric, USE.NAMES = F)
+# stuff with the python list aha
+# tofix: company name is fucked wtf? but whatever idc
+#cities <- maps::us.cities %>% mutate(Location = sub(" ", ", ", name)) %>% select(Location, lat, long)
+cities <- read_csv("F:\\summer 21\\99519\\uscities.csv") %>% select(city, state_id, lat, lng) %>% 
+  mutate(Location = paste(city, ", ", state_id, sep=""))
+all.df <- inner_join(all.df, cities, by="Location")
+
+# df for map-making. group by cities and have values for num jobs, avg salary, etc
+map.df <- all.df %>% group_by(Location) %>% summarize(num.jobs = n(), avg.salr = mean(`Salary Estimate`), med.rent = median(`January 2017`), med.rate = median(Rating)) %>% inner_join(cities, by="Location")
+
+top.jobs <- all.df %>% group_by(`Job Title`, Location) %>% summarize(n = n()) %>% group_by(Location) %>% summarize(total.for.loc = n(), num = n, job = `Job Title`) %>% mutate(pct = num/total.for.loc)
+#well idk why I'm having so much trouble doin what I want
+#i just want to paste function all the job titles into one string for each unique location
+unique.loc = unique(top.jobs$Location)
+num.loc = length(unique.loc)
+top.jobs.str <- rep(NA, num.loc)
+for(ii in 1:num.loc){
+  vec.tmp <- filter(top.jobs, Location == unique.loc[ii]) %>% arrange(desc(num))
+  #aieeee the double for loop
+  str.tmp = ""
+  m = dim(vec.tmp)[1]
+  if(m > 3){
+    m = 3
+  }
+  for(jj in 1:m){
+    str.tmp = paste(str.tmp, vec.tmp$job[jj], " (",
+                    round(vec.tmp$pct[jj]*100, 1), "%)\n", sep="")
+  }
+  top.jobs.str[ii] = str.tmp
+}
+#ahahaha
+top.jobs.df <- cbind(unique(top.jobs$Location), top.jobs.str) %>% as.data.frame
+colnames(top.jobs.df) <- c("Location", "Top Listings")
+top.jobs.df <- inner_join(top.jobs.df, cities, by="Location")
+```
+
+# Abstract
+
+There has occassionally been some doubt over the viability of data science careers, even within (or perhaps especially within) the field of data science itself: is it secure? Is it worth investing in? Is "data science" really even a career and not a buzzword for hours and hours of Microsoft Excel until you die? The best truth we can get is that data science is a broad term for a wide variety of statistical applications. Job titles can range from "Data Engineer" to "Data Analyst" or simply "Software Engineering" and tools range from the usual R, Python, and Excel to an increasing obscure amalgamation of libraries and packages. Job-seeking data scientists (such as the author) would find it insightful to their career search to see a breakdown of the data behind data science jobs and what salaries, degrees, tools, and locations are commonly listed. This project provides some EDA and basic NLP and geospatial information of data analyst job listings scraped from Glassdoor to address the research questions of what skills, degrees, and job titles are the most common across which locations, and where the most price-optimal city to work in would be.
+
+# Data 
+
+Three datasets were used in this project: a dataset for the job listings, a dataset for the average rent prices by U.S, city, and a dataset of U.S. cities and their coordinates.
+
+The dataset for the job listings was obtained from Github user picklesueat [(link to dataset)](https://github.com/picklesueat/data_jobs_data) and contains about 2500 rows, each row being an individual job listing web scraped from Glassdoor.com, a major job board site, in July 2020. The columns of the dataset describe each listing's:
+
++ Job title
++ Glassdoor salary estimate
++ Rating
++ Company Name
++ Location (city and state)
++ Industry
++ Sector
+
+The job listing dataset is licensed under the MIT License, which allows free use and modification [(license text available here)](https://github.com/harshibar/5-python-projects/blob/master/LICENSE).
+
+The second data set for rent prices was obtained from Zillow's Rent Index housing data, obtained through Kaggle.com [(link to dataset)](https://www.kaggle.com/zillow/rent-index). Zillow is an online real estate marketplace company and has provided their data on the estimated rent by city in the U.S. from January 2010 to January 2017; the latter was used as it is the most recent. The data from Zillow, while publicly available, is not listed as being under a specific license.
+
+The third dataset, of US cities and their coordinates, is from the simplemaps U.S. cities database. [(link to dataset)](https://simplemaps.com/data/us-cities). The dataset is licensed under Creative Commons and is available for use and modification.
+
+# Visualizations
+
+We begin some exploratory data analysis with some histograms.
+
+```{r}
+job.title.hist <- all.df$`Job Title` %>% table %>% as.data.frame %>% top_n(7, Freq) %>% mutate(Job = str_wrap(., width=10)) %>%
+  ggplot(aes(x = reorder(Job, -Freq), y = Freq)) + geom_bar(stat = "identity") +
+  labs(x = "Job Title", y="count", title="Top 7 Most Common Job Titles", subtitle="'Engineer' is the most popular") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3))
+job.title.hist
+```
+
+"Data Engineer" appears to be the far most common job title, followed by the very similar title "Big Data Engineer". We also can see that "Senior Data Engineer" and "Sr. Data Engineer", the 4th and 5th most common titles, are actually the same. The most common title without the word "Data" is "Software Engineer" at 3rd, with 60 occurrences, followed by "Machine Learning Engineer" at 7th with 12 occurrences.
+
+```{r}
+loc.hist <- all.df$Location %>% table %>% as.data.frame %>% top_n(10, Freq) %>% mutate(Location = str_wrap(., width=10)) %>%
+  ggplot(aes(x = reorder(Location, -Freq), y = Freq)) + geom_bar(stat = "identity") +
+  labs(x = "City", title="Top 11 Most Common Job Locations by City", subtitle="(Top 10 with tie)\nTexas is highly represented") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3))
+loc.hist
+```
+
+One might expect STEM jobs to commonly be located in Bay Area, California, but within our data it appears that the jobs' cities are most commonly in Texas, with Texas representing the top 2 cities and 4 of the 11 top cities. California's appearances are both Southern California. We can check if Texas was mis-overrepresented here by graphing the locations by state only.
+
+```{r}
+state.hist <- all.df$State %>% table %>% as.data.frame %>% top_n(10, Freq) %>% mutate(State = str_wrap(., width=10)) %>%
+  ggplot(aes(x = reorder(State, -Freq), y = Freq)) + geom_bar(stat = "identity") +
+  labs(x = "State", y="count", title="Top 10 Most Common Job Locations by State", subtitle="Texas is indeed the largest state in the continental US") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3))
+state.hist
+```
+
+The order of states is not very different to the states as seen in the histogram of cities -- Texas is still in the lead, followed by Arizona, Illinois, Pennsylvania, and then California.
+
+# NLP
+
+Some basic Natural Language Processing was done on the job listings' descriptions using Python's Natural Language ToolKit library. The process that was used for extracting keywords of the jobs' desired tools and level of education is described [here](https://towardsdatascience.com/how-to-use-nlp-in-python-a-practical-step-by-step-example-bd82ca2d2e1e).
+
+A list of likely desired tools (such as coding languages, libraries) was created from each listing's description, as well as a value for if a minimum level of education (Bachelor's, Master's Doctorate) was mentioned. We can view the overall frequencies of skills and education levels in the following histograms.
+
+```{r}
+#ooooooohhhhhhh myyyyyyyyyyy goooooooood I just want this to be overrrrrrrrr!!!!!!!!!!!!!!!!!!!!!!!1
+all.tools <- c()
+all.edu <- c()
+#the cringe for loop R vector appending
+n = dim(all.df)[1]
+for(ii in 1:n){
+  mylist <- all.df$tools[ii] %>% str_sub(start=3, end=str_length(all.df$tools[ii])-2) %>% strsplit("', '") %>% unlist
+  all.tools <- c(all.tools, mylist)
+  myedu = all.df$education[ii]
+  edu.ret = "Not Specified"
+  if(myedu == 1){
+    edu.ret = "Bachelor's"
+  }else if(myedu == 2){
+    edu.ret = "Master's"
+  }else if(myedu == 3){
+    edu.ret = "Doctorate"
+  }else if(myedu == 4){
+    edu.ret = "Postdoc"
+  }
+  all.edu = c(all.edu, edu.ret)
+}
+
+my.dict = data.frame(all.tools = c("python", "sql", "cloud", "java", "aw", "spark", "hadoop", "kafka", "scala", "nosql", "hive", "azur", "linux", "docker", "git"),
+                     type = c("Language", "Language", "Cloud Services", "Language", "Cloud Services", "Framework", "Framework", "Framework", "Language", "Other", "Software/Platform", "Cloud Services", "Other", "Software/Platform", "Software/Platform"))
+
+table(all.tools) %>% as.data.frame %>% top_n(15, Freq) %>% left_join(., my.dict, by="all.tools") %>% 
+  mutate(all.tools = str_wrap(all.tools, width=10)) %>%
+  ggplot(aes(x = reorder(all.tools, -Freq), y = Freq, fill=type)) + geom_bar(stat = "identity") +
+  labs(title = "Top 15 tools mentioned in job listings",
+       x = "Tool", y = "count", subtitle = "Programming languages and cloud computing are most sought after") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3),
+        legend.position = "bottom")
+```
+
+Note that "aw" is "Amazon Web Service (AWS)" but the S was removed in the NLP attempt at stemming (in this case, treating plural and singular as the same word). Python and SQL are the most frequently mentioned tools, followed by "cloud" (just a blanket term for using cloud services), Java, AWS, and three Apache frameworks. 
+
+Below is a histogram of mentioned minimum education level in job listings, showing that a Bachelor's degree is the most commonly listed.
+
+```{r}
+table(all.edu) %>% as.data.frame %>%
+  ggplot(aes(x = reorder(all.edu, -Freq), y = Freq)) + geom_bar(stat = "identity") +
+  labs(title = "Minimum education level mentioned in job listings",
+       x = "", y = "count", subtitle = "A bachelor's is sufficient for most jobs") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3),
+        legend.position = "bottom")
+```
+
+# Rent and Salary Comparisons
+
+We can use the rent index data to compare the estimated salaries with the estimated cost of living. The data used here for the rent index is limited to cities that were ever included in the job listing data, which consists of 38 unique cities. Since the rent prices are monthly and the salaries are yearly, the rent values in the boxplot below have been multiplied by 12 for comparison. 
+
+
+```{r}
+# all.df %>% mutate(salary = `Salary Estimate`*1000) %>% ggplot(aes(x=salary)) +
+#   geom_histogram(bins=11, col="black", fill="grey80") +
+#   scale_x_continuous(labels = scales::label_number_si(prefix = "$")) +
+#   labs(title="Distribution of Glassdoor Estimated Salary", subtitle = "Mean of $97.3K\nMedian of $94K", x = "Salary")
+all.df %>% mutate(salary = `Salary Estimate`*1000, rent = `January 2017`*12) %>% 
+  select(salary, rent) %>% gather(money.type, val) %>%
+  ggplot(aes(y = val, fill = money.type)) + geom_boxplot() +
+  scale_y_continuous(labels = scales::label_number_si(prefix = "$")) +
+  labs(x = "", y = "", title = "Distributions of Yearly Rent and Salary", subtitle="Minor overlap between the two, both are right-skewed\nMedian Salary $94K, Median Rent $1475/month") +
+  theme(panel.background = element_blank(),
+        panel.grid.major.y = element_line(color = "grey90", size = 0.3),
+        legend.title = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank())
+```
+
+Note that the Glassdoor salary estimate is as a range in the original dataset, e.g. "\$90K - \$115K"; this project used the midpoint between those two values. It appears that the average data scientist will be hired to make just shy of six digits a year with a median Glassdoor estimate salary of $94K, though the distribution is slightly right-skewed. Rent is more skewed than salary, and there is some overlap between the two, although we can empirically deduce that a location with an abnormally high rent and lower-quartile salary is unlikely.
+
+We can compare the average estimated salary prices with the average estimated rent in each of our 88 unique cities that we have data of, shown in the scatterplot below.
+
+```{r}
+# all.df %>% mutate(salary = `Salary Estimate`*1000, rent = `January 2017`*12) %>%
+#  select(salary, rent, Location) %>% group_by(Location, rent) %>% 
+#   summarize(avg.salr = mean(salary)) %>% mutate(diff = avg.salr-rent) %>%
+#   gather(money.type, val, rent, avg.salr) %>% 
+#   ggplot(aes(fill = money.type, y = val, x= reorder(Location, diff))) + geom_bar(stat = "identity", position = "dodge") + 
+#   labs(title = "Salary and Rent Comparison, Ordered by Difference",
+#        subtitle = "Cities with the greatest difference tend to be in San Jose or SoCal")
+#   theme(legend.position = "top",
+#         legend.title = element_blank(),
+#         axis.title = element_blank(),
+#         panel.background = element_blank(),
+#         panel.grid.major.x = element_line(color = "grey90", size = 0.3)) +
+#   scale_fill_discrete(labels = c("Salary", "Rent")) +
+#   scale_y_continuous(labels = scales::label_number_si(prefix = "$")) +
+#   coord_flip()
+#well... i made this bar graph back when I used a bad city dataset and there were only 38 cities to graph
+#but now there's 113 so I guess I'll use a different kind of graph.....
+avg.salr <- all.df %>% mutate(salary = `Salary Estimate`*1000, rent=`January 2017`*12) %>% group_by(Location, rent) %>% summarize(salary = mean(salary)) %>% mutate(type = "City Average")
+cost.scatter <- all.df %>% mutate(salary = `Salary Estimate`*1000, rent = `January 2017`*12, type = "Individual") %>% select(Location, rent, salary, type) %>% rbind(avg.salr) %>%
+  ggplot(aes(x = salary, y = rent, text=Location, color=type)) + 
+  geom_point() + 
+  geom_abline(lty = "dashed", slope = 0.3) +
+  labs(x="Yearly Salary", y="Yearly Rent") +
+  scale_x_continuous(labels = scales::label_number_si(prefix = "$")) +
+  scale_y_continuous(labels = scales::label_number_si(prefix = "$")) +
+  scale_color_manual(name = "Type of Salary", values = c("orange", "#00000055"))
+ggplotly(cost.scatter) %>% layout(title = list(text = paste0("City Salary and Rent Comparison", '<br>', '<sup>', "Shown with 0.3 line: 30% is a popular rule of thumb for the ratio of rent to income",'</sup>'), x = 0.01))
+#the subtitle clips through the graph but i cant figure out how to fix it and i dont care anymore
+```
+
+Here, city average refers to the average salary of data analyst job listings in our dataset, not the average salary of all jobs in the city, and individual refers to an individual job listing.
+
+Most city average salaries are below the 30% line, so we can conclude that data analyst jobs are making fairly decent money. We observe a cluster of cities above the line around the \$120K salary, \$50K yearly rent (about \$4K monthly) area consisting of cities around the Bay Area, California. It appears that Westlake, TX has an unusually high rent. The town is a very small suburb with a population of under a thousand and a median salary of about \$128K, so it is likely just an unusually well-off area.
+
+There are a few outliers of smaller towns with apparently very optimal salary-to-rent ratios. Most six-digit salaries under the 30% line appear to be located in Texas or Southern California.
+
+Finally, we plot our cities on a map to get a better view of the varying rent indeces, salaries, and job locations. Each city's popup for the number of jobs also shows its three most common job titles. 
+
+```{r}
+map <- leaflet(data = map.df) %>% addProviderTiles(providers$CartoDB.Positron) %>% 
+  addCircleMarkers(lng = ~lng, lat=~lat, 
+                   popup = paste0(map.df$Location,
+                                  "<br>",
+                                  "Number of Listings: ",
+                                  map.df$num.jobs,
+                                  "<br>",
+                                  "Top Listings: ",
+                                  top.jobs.df$`Top Listings`
+                                  ),
+                   radius = ~sqrt(num.jobs)*2,
+                   stroke = F,
+                   group = "By No. Jobs") %>%
+  addCircleMarkers(lng = ~lng, lat=~lat, 
+                   popup = paste0(map.df$Location,
+                                  "<br>",
+                                  "Estimated Rent: ",
+                                  map.df$med.rent
+                                  ),
+                   radius = ~sqrt(med.rent*0.012*4), #matches it to salary
+                   stroke = F,
+                   color = "red",
+                   group = "By Rent") %>%
+  addCircleMarkers(lng = ~lng, lat=~lat, 
+                   popup = paste0(map.df$Location,
+                                  "<br>",
+                                  "Average Salary: ",
+                                  map.df$avg.salr
+                                  ),
+                   radius = ~sqrt(avg.salr)*2,
+                   stroke = F,
+                   group = "By Average Salary",
+                   color = "springgreen") %>%
+  addLayersControl(
+    overlayGroups = c("By No. Jobs", "By Rent", "By Average Salary")
+  )
+map
+```
+
+We can draw similar observations as we did earlier: a high number of jobs in Texas, then California. We observe that the rent is typically lower in Texas while having a similar salary to California.
+
+# Conclusion
+
+From this rudimentary financial perspective, the career outlooks for data scientists doesn't seem so bad: most job offers only require a bachelor and have salaries within the 30% ratio for rent. Most job titles are seeking some form of engineer with knowledge of 2-3 programming languages, cloud services, and preferably experience with Apache frameworks. Jobs with an ideal rent-to-salary ratio (around or under 30%) are commonly located in Texas or Southern California.
+
+This project gives a very rough overview of what the data science career search might look like, but searching for a job of course requires far more nuance. The variables explored in the project were limited to basic job qualifications, salary, and location, but in reality there are far more factors that impact job selection, ranging from the company itself to any number of personal circumstances to the intangible influence of networking.
+
+There are also several shortcomings in the project methodology that reduce the reliability of its results. Most immediately is the fact that the job listing data is from 2020, the rental data from 2017, and neither being really up-to-date with the changes caused by COVID. One might be able to live in a low-rent city and high-end salaries by working remotely. The web-scraped job listing data would also have benefited from being cleaned; we saw earlier how "Senior Data Engineer" and "Sr. Data Engineer" were treated as different job titles.
+
+Future work on this subject could include scraping one's own data, as the job listing dataset used in this project also provided the script used to scrape it, allowing for more recent data. The currently used Python script for NLP is both unoriginal and highly inefficient from using pandas over numpy, so improving the NLP would also be subject to improvement. It would also be of interest to more rigorously explore the relationships between skills, salary, and location and see if latitude and longitude have any association with the types of careers desired.
